@@ -992,8 +992,12 @@ private const val VIDEO_OVERLAY_HIDE_MS = 4000L
 
 @Composable
 private fun DebugOverlay(info: DebugInfo, modifier: Modifier = Modifier) {
+    // callers anchor this to a screen corner, which a TV then clips away by overscan.
+    // inset it by the broadcast-safe margin so the numbers stay readable on a panel.
+    val tv = isTv()
     Column(
         modifier = modifier
+            .padding(horizontal = if (tv) 40.dp else 0.dp, vertical = if (tv) 20.dp else 0.dp)
             .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(8.dp))
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp)

@@ -142,12 +142,40 @@ struct AudioEngine {
                         makeDecoder(ct, wantConfig.spf, mSampleRate, mChannels, *mTimeline,
                                     mDecLatency, *mLog, mApplied->forceSwAlac,
                                     mApplied->realtimePriority, mApplied->lowLatency)};
-            mRetryAtNs = mDecoder.decoder ? 0 : monoNs() + DECODER_RETRY_NS;
+            if (mDecoder.decoder) {
+                if (mDecoderFailures > 0)
+                    mLog->info("audio decoder recovered after %d failed attempt(s); %d packet(s) had nowhere to go",
+                               mDecoderFailures, mStarvedPackets);
+                mDecoderFailures = 0;
+                mStarvedPackets = 0;
+                mRetryBackoffNs = DECODER_RETRY_MIN_NS;
+                mRetryAtNs = 0;
+            } else {
+                // the hardware codec service is often still busy right after a release, so
+                // the first retries have to be quick. upstream waits a flat second here,
+                // which mutes audio for whole seconds whenever a stream restart (new
+                // episode, new track) makes creation fail on the first try.
+                mDecoderFailures++;
+                mLog->error("audio decoder creation failed (attempt %d), retrying in %lld ms",
+                            mDecoderFailures, (long long)(mRetryBackoffNs / 1000000));
+                mRetryAtNs = monoNs() + mRetryBackoffNs;
+                const int64_t next = mRetryBackoffNs * 2;
+                mRetryBackoffNs = next > DECODER_RETRY_MAX_NS ? DECODER_RETRY_MAX_NS : next;
+            }
             // codec switch is definitely a discontinuity
             mTimeline->reanchorTracker();
         }
-        if (mDecoder.decoder && !mDecoder.decoder->decode(data, len, ptsNs))
-            mDecodeErrors.fetch_add(1, std::memory_order_relaxed);
+        if (mDecoder.decoder) {
+            if (!mDecoder.decoder->decode(data, len, ptsNs))
+                mDecodeErrors.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            // audio is arriving but there is nowhere to put it. upstream discards it here
+            // silently - no counter moves - which is exactly why the debug overlay shows
+            // errs=0, drop=0 and sil=0 while the buffer sits at 0 ms.
+            if (mStarvedPackets == 0)
+                mLog->error("audio arriving with no decoder; discarding until one is created");
+            mStarvedPackets++;
+        }
     }
 
 private:
@@ -193,8 +221,13 @@ private:
         std::unique_ptr<Decoder> decoder;
     };
     CreatedDecoder mDecoder;
-    static constexpr int64_t DECODER_RETRY_NS = 1'000'000'000LL;
+    // escalating backoff for decoder re-creation (upstream: flat 1s)
+    static constexpr int64_t DECODER_RETRY_MIN_NS = 20'000'000LL;
+    static constexpr int64_t DECODER_RETRY_MAX_NS = 500'000'000LL;
     int64_t mRetryAtNs = 0;  // earliest retry of failed decoder
+    int64_t mRetryBackoffNs = DECODER_RETRY_MIN_NS;
+    int mDecoderFailures = 0;   // consecutive failed creations
+    int mStarvedPackets = 0;    // packets discarded while no decoder existed
 
     // wanted config per codec, keyed by ctIndex
     static constexpr int NUM_CT = 3;
