@@ -41,7 +41,11 @@ typedef struct {
  * the streaming threads would disturb the very timing we are trying to measure. */
 static bool _is_session_milestone(const char *msg) {
     static const char *const kKeys[] = {
-        "TEARDOWN", "SETUP", "RECORD", "FLUSH", "ANNOUNCE", "PAUSE", "OPTIONS",
+        /* session-level RTSP methods; OPTIONS/GET_PARAMETER are heartbeats and stay out */
+        "TEARDOWN", "SETUP", "RECORD", "FLUSH", "ANNOUNCE", "PAUSE",
+        /* SEQ: RTP resequencing-buffer diagnostics (patches/UxPlay/0007) - this sits
+         * upstream of every counter the app has, so a stall there is otherwise invisible */
+        "SEQ",
     };
     for (const char *key : kKeys) {
         if (strstr(msg, key)) return true;

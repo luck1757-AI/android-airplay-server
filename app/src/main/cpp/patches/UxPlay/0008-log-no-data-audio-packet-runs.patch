@@ -1,0 +1,40 @@
+diff --git a/lib/raop_rtp.c b/lib/raop_rtp.c
+index 35d42df..a0757c9 100644
+--- a/lib/raop_rtp.c
++++ b/lib/raop_rtp.c
+@@ -382,6 +382,11 @@ raop_rtp_thread_udp(void *arg)
+     raop_rtp_t *raop_rtp = arg;
+     unsigned char packet[RAOP_PACKET_LEN];
+     unsigned int packetlen = 0;
++    /* diagnostic: AAC-ELD streams open with a run of "no data" packets that this thread
++     * skips outright. if a source-side restart re-opens the stream, that run is dead air
++     * the app cannot see - every counter it has sits downstream of here. */
++    unsigned int nodata_run = 0;
++    uint64_t nodata_run_start = 0;
+     struct sockaddr_storage saddr;
+     socklen_t saddrlen = 0;
+     bool got_remote_control_saddr = false;
+@@ -590,8 +595,23 @@ raop_rtp_thread_udp(void *arg)
+             if (packetlen == 12 ||(packetlen == 16 && memcmp(packet + 12, no_data_marker, 4) == 0)) {
+                 /* this is a "no data" packet */
+ 	        /* the first such packet could be used to provide the initial rtptime and seqnum formerly given in the RECORD request */
++                if (!nodata_run) {
++                    nodata_run_start = raop_ntp_get_local_time();
++                    logger_log(raop_rtp->logger, LOGGER_ERR,
++                               "SEQ no-data audio packets begin seqnum=%u",
++                               (unsigned) byteutils_get_short_be(packet, 2));
++                }
++                nodata_run++;
+                 continue;
+             }
++            if (nodata_run) {
++                logger_log(raop_rtp->logger, LOGGER_ERR,
++                           "SEQ audio payload resumes after %u no-data packets over %u ms, seqnum=%u",
++                           nodata_run,
++                           (unsigned) ((raop_ntp_get_local_time() - nodata_run_start) / 1000),
++                           (unsigned) byteutils_get_short_be(packet, 2));
++                nodata_run = 0;
++            }
+ 	    
+             if (raop_rtp->ct == 2 && packetlen == 44)  continue;   /* ignore the ALAC packets with format information only. */
+ 

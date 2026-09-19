@@ -1,0 +1,42 @@
+diff --git a/lib/raop_buffer.c b/lib/raop_buffer.c
+index d0ed368..5738feb 100644
+--- a/lib/raop_buffer.c
++++ b/lib/raop_buffer.c
+@@ -60,6 +60,9 @@ struct raop_buffer_s {
+     unsigned short first_seqnum;
+     unsigned short last_seqnum;
+ 
++    /* diagnostic: packets dropped in a row by the "too late" test in enqueue */
++    unsigned int late_discards;
++
+     /* RTP buffer entries */
+     raop_buffer_entry_t entries[RAOP_BUFFER_LENGTH];
+ };
+@@ -188,8 +191,27 @@ raop_buffer_enqueue(raop_buffer_t *raop_buffer, unsigned char *data, unsigned sh
+ 
+     /* If this packet is too late, just skip it */
+     if (!raop_buffer->is_empty && seqnum_cmp(seqnum, raop_buffer->first_seqnum) < 0) {
++        /* This test silently discards every packet whose sequence number sits behind the
++         * buffer's start, and first_seqnum only advances when a packet is accepted - so a
++         * sender that restarts its RTP numbering behind us keeps being dropped here, with
++         * no counter moving anywhere downstream. From the app the audio simply stops. Log
++         * it so that case can be confirmed or ruled out. */
++        raop_buffer->late_discards++;
++        if (raop_buffer->late_discards == 1 || raop_buffer->late_discards % 64 == 0) {
++            logger_log(raop_buffer->logger, LOGGER_ERR,
++                       "SEQ discarded late audio packet seqnum=%u first=%u last=%u run=%u",
++                       (unsigned) seqnum, (unsigned) raop_buffer->first_seqnum,
++                       (unsigned) raop_buffer->last_seqnum, raop_buffer->late_discards);
++        }
+         return 0;
+     }
++    if (raop_buffer->late_discards) {
++        logger_log(raop_buffer->logger, LOGGER_ERR,
++                   "SEQ resumed after %u discarded packets seqnum=%u first=%u",
++                   raop_buffer->late_discards, (unsigned) seqnum,
++                   (unsigned) raop_buffer->first_seqnum);
++        raop_buffer->late_discards = 0;
++    }
+ 
+     /* Check that there is always space in the buffer, otherwise flush */
+     if (seqnum_cmp(seqnum, raop_buffer->first_seqnum + RAOP_BUFFER_LENGTH) >= 0) {
