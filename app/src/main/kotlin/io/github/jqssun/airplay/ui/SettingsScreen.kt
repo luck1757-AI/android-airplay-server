@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -70,11 +71,17 @@ fun SettingsScreen(viewModel: MainViewModel) {
     val audioAdaptiveStep by viewModel.audioAdaptiveStep.collectAsState()
     val oboeBufferFrames by viewModel.oboeBufferFrames.collectAsState()
 
+    // TVs overscan: without a safe-area inset the first and last columns of the UI are cut
+    // off by the panel's own bezel/scaling. 5% each way is the usual broadcast-safe margin.
+    val tv = isTv()
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(vertical = 8.dp)
+            .padding(
+                horizontal = if (tv) 48.dp else 0.dp,
+                vertical = if (tv) 27.dp else 8.dp,
+            )
     ) {
         SectionHeader(stringResource(R.string.section_server))
 
@@ -88,7 +95,8 @@ fun SettingsScreen(viewModel: MainViewModel) {
             label = stringResource(R.string.setting_server_port),
             value = serverPort.toString(),
             onCommit = { viewModel.setServerPort(it.toInt()) },
-            range = 1..65535
+            range = 1..65535,
+            step = 1
         )
 
         SettingSwitch(
@@ -372,7 +380,8 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     value = audioCushionMs.toString(),
                     onCommit = { viewModel.setAudioCushionMs(it.toInt()) },
                     description = stringResource(R.string.setting_audio_cushion_ms_desc),
-                    range = 1..1000
+                    range = 1..1000,
+                    step = 10
                 )
             }
 
@@ -381,7 +390,8 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 value = oboeBufferFrames.toString(),
                 onCommit = { viewModel.setOboeBufferFrames(it.toInt()) },
                 description = stringResource(R.string.setting_oboe_buffer_frames_desc),
-                range = 0..8192
+                range = 0..8192,
+                step = 64
             )
 
 
@@ -520,8 +530,29 @@ private fun SettingTextField(
     value: String,
     onCommit: (String) -> Unit,
     description: String? = null,
-    range: IntRange? = null
+    range: IntRange? = null,
+    step: Int = 1,
 ) {
+    // a remote cannot drive a text field: focusing one pops the system IME, and the TV
+    // on-screen keyboard has no left/right cursor keys, so the value cannot be edited at
+    // all. numeric settings get a d-pad stepper instead; touch devices keep the text field.
+    if (range != null && isTv()) {
+        val current = value.toIntOrNull() ?: range.first
+        ListItem(
+            headlineContent = { Text(label) },
+            supportingContent = description?.let { { Text(it) } },
+            trailingContent = { Text("◀  $current  ▶") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .dpadFocus()
+                .dpadAdjust(
+                    onLeft = { onCommit((current - step).coerceIn(range.first, range.last).toString()) },
+                    onRight = { onCommit((current + step).coerceIn(range.first, range.last).toString()) },
+                )
+                .focusable()
+        )
+        return
+    }
     var text by remember(value) { mutableStateOf(value) }
     val valid = range == null || text.toIntOrNull()?.let { it in range } == true
     fun save() {

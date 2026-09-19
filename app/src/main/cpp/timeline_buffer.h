@@ -248,10 +248,18 @@ public:
         if (gapNs > MAX_GAP_NS || gapNs < -MAX_GAP_NS) {
             // discontinuity: write immediately. new sound after long silence resets
             // backlog to ideal size (less latency); on clock resync we keep the sound
-        } else if (gapNs > SLACK_NS) {
-            // sender left gap: reproduce as silence so timing is exact
+        } else if (gapNs > SLACK_NS && gapNs <= MAX_SILENCE_FILL_NS) {
+            // sender left a short gap: reproduce as silence so timing is exact
             const size_t silenceFrames = (size_t)(gapNs * mSampleRate / NS_PER_SEC);
             writeSilenceFrames(silenceFrames);
+            mMetrics.countSilence();
+        } else if (gapNs > MAX_SILENCE_FILL_NS) {
+            // longer gap: upstream materializes this as real silence samples too, which the
+            // consumer must then play out in real time before any audio behind it is heard -
+            // and successive gaps accumulate. that is correct for gapless music, but during
+            // mirroring a gap means the source paused (new episode, new clip), so resync and
+            // let the audio through instead of queueing dead air ahead of it.
+            mTracker.reanchor();
             mMetrics.countSilence();
         } else if (gapNs < -SLACK_NS) {
             // slot already passed (late/overlap): drop
@@ -379,6 +387,10 @@ private:
 
     static constexpr int64_t SLACK_NS = 10'000'000LL;    // ignore <10ms gaps (NTP shift, rounding)
     static constexpr int64_t MAX_GAP_NS = 750'000'000LL; // >750ms = discontinuity, re-anchor
+    // longest sender gap still reproduced as buffered silence; beyond this it is treated
+    // as a pause and resynced. upstream has no such bound (it fills up to MAX_GAP_MS).
+    static constexpr int MAX_SILENCE_FILL_MS = 120;
+    static constexpr int64_t MAX_SILENCE_FILL_NS = (int64_t)MAX_SILENCE_FILL_MS * 1'000'000LL;
     static constexpr int PRIME_TIMEOUT_MS = 200;         // max time priming may mute output
     static constexpr int64_t PRIME_TIMEOUT_NS = (int64_t)PRIME_TIMEOUT_MS * 1'000'000LL;
     static constexpr int TRIM_FLOOR_MS = 30;             // min trim point even for tiny cushion
