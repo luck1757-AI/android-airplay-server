@@ -93,9 +93,11 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeInit(
     }
     ctx->cb_ctx.raop = ctx->raop;
 
-    // DEBUG (7), not DEBUG_DATA (8): the RTSP handlers log stream setup/teardown at this
-    // level, while per-packet dumps sit one level above and stay off
-    raop_set_log_level(ctx->raop, LOGGER_DEBUG);
+    // Back to ERR. At DEBUG the mirror and rtp paths log per packet, and logger_log only
+    // short-circuits on level - so every one of those became a vsnprintf plus a logcat
+    // syscall on the streaming threads, starving the audio callback whenever video was
+    // actually rendering. The SEQ probes below log at ERR, so they still come through.
+    raop_set_log_level(ctx->raop, LOGGER_ERR);
     raop_set_log_callback(ctx->raop, _log_callback, NULL);
 
     const char *keyfile_c = env->GetStringUTFChars(keyFile, NULL);
