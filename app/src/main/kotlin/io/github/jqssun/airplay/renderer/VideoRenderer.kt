@@ -30,6 +30,10 @@ class VideoRenderer(ctx: Context) {
     @Volatile var codecName = ""; private set
     @Volatile var droppedFrames = 0L; private set
     @Volatile var framePacingJitterUs = 0L; private set
+    // anchor snaps: high and climbing means the link or the decoder cannot hold the rate
+    @Volatile var resyncs = 0L; private set
+    // frames discarded to close an accumulated lag instead of rendering them late
+    @Volatile var catchupDrops = 0L; private set
 
     var enforceSdr = true
     var keyAllowFrameDrop = true
@@ -90,6 +94,7 @@ class VideoRenderer(ctx: Context) {
     private fun _resetStats() {
         fps = 0; bitrateBps = 0; frameCount = 0; codecName = ""
         droppedFrames = 0; framePacingJitterUs = 0
+        resyncs = 0; catchupDrops = 0
         _framesThisSec = 0; _bytesThisSec = 0
     }
 
@@ -112,7 +117,7 @@ class VideoRenderer(ctx: Context) {
     private fun _emitBenchmarkLine() {
         val msg = "fps=$fps bitrate=${bitrateBps / 1000}kbps " +
             "jitter=${framePacingJitterUs}us frames=$frameCount " +
-            "dropped=$droppedFrames codec=$codecName " +
+            "dropped=$droppedFrames resync=$resyncs catchup=$catchupDrops codec=$codecName " +
             "res=${videoWidth}x${videoHeight}"
         Log.i(BENCH_TAG, msg)
         benchmarkLogCallback?.invoke(msg)
@@ -263,21 +268,66 @@ class VideoRenderer(ctx: Context) {
         codec = null
     }
 
+    // one drain pass is collected first so a decoder backlog can be coalesced rather than
+    // rendered in full: rendering every late frame is what turns a hiccup into standing lag
+    private val _drainIdx = ArrayList<Int>(16)
+    private val _drainPtsUs = ArrayList<Long>(16)
+
     private fun drainOutput() {
         val c = codec ?: return
         val info = MediaCodec.BufferInfo()
+
+        _drainIdx.clear()
+        _drainPtsUs.clear()
         while (true) {
             val idx = c.dequeueOutputBuffer(info, 0)
             if (idx < 0) break
+            _drainIdx.add(idx)
+            _drainPtsUs.add(info.presentationTimeUs)
+        }
+        if (_drainIdx.isEmpty()) return
+
+        val frameIntervalNs = if (maxFps > 0) 1_000_000_000L / maxFps else 16_666_667L
+        val last = _drainIdx.size - 1
+
+        for (i in 0..last) {
             _recordOutputFrameTime()
+            val idx = _drainIdx[i]
+            val ptsUs = _drainPtsUs[i]
+            val nowNs = System.nanoTime()
+
+            if (_ptsBaseUs == Long.MIN_VALUE) {
+                _ptsBaseUs = ptsUs
+                _wallBaseNs = nowNs + TARGET_LEAD_NS
+            }
+
+            // sender NTP and local monotonic run at slightly different rates, so the mapping
+            // established at the first frame is wrong by a growing amount; measure that error
+            // every frame instead of trusting the original anchor forever
+            var errNs = (_wallBaseNs + (ptsUs - _ptsBaseUs) * 1000L) - nowNs - TARGET_LEAD_NS
+            if (errNs > RESYNC_THRESHOLD_NS || errNs < -RESYNC_THRESHOLD_NS) {
+                // discontinuity (reconnect, codec switch) or the decoder fell hopelessly
+                // behind: the anchor is wrong rather than drifting, so snap it
+                _ptsBaseUs = ptsUs
+                _wallBaseNs = nowNs + TARGET_LEAD_NS
+                resyncs++
+                errNs = 0L
+            } else {
+                // first-order servo: absorb the drift each frame instead of accumulating it
+                _wallBaseNs -= errNs / DRIFT_DIVISOR
+            }
+
+            val scheduledNs = _wallBaseNs + (ptsUs - _ptsBaseUs) * 1000L
+            // a frame already past its slot with newer frames waiting behind it is pure
+            // latency: dropping it here is safe, unlike dropping decoder input
+            if (i < last && scheduledNs < nowNs - frameIntervalNs) {
+                c.releaseOutputBuffer(idx, false)
+                catchupDrops++
+                droppedFrames++
+                continue
+            }
             if (scheduledOutputBufferRelease) {
-                // schedule frame at VSYNC matching its NTP presentation time
-                val ptsUs = info.presentationTimeUs
-                if (_ptsBaseUs == Long.MIN_VALUE) {
-                    _ptsBaseUs = ptsUs
-                    _wallBaseNs = System.nanoTime()
-                }
-                c.releaseOutputBuffer(idx, _wallBaseNs + (ptsUs - _ptsBaseUs) * 1000L)
+                c.releaseOutputBuffer(idx, scheduledNs)
             } else {
                 c.releaseOutputBuffer(idx, true)
             }
@@ -319,6 +369,12 @@ class VideoRenderer(ctx: Context) {
     companion object {
         private const val TAG = "VideoRenderer"
         private const val BENCH_TAG = "BENCHMARK"
+        // scheduling lead: roughly one vsync, enough for the compositor to pick the frame up
+        private const val TARGET_LEAD_NS = 16_000_000L
+        // past this the anchor is wrong rather than drifting, so snap instead of servoing
+        private const val RESYNC_THRESHOLD_NS = 300_000_000L
+        // servo gain: correct 1/32 of the error per frame, settling in well under a second
+        private const val DRIFT_DIVISOR = 32L
         private const val FEED_WAIT_US = 20_000L
         private const val FEED_RETRIES = 10
         private const val FIRST_FEED_RETRIES = 50

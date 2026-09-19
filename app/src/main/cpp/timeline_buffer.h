@@ -145,7 +145,11 @@ private:
     }
 
     static constexpr int MIN_CUSHION_MS = 0;             // algorithm already enforces effective floor
-    static constexpr int MAX_CUSHION_MS = 1000;
+    // mirroring-tuned ceiling. upstream allows 1000ms, which lets a jittery link push the
+    // audio cushion (and with it the lip-sync error) up by most of a second before the
+    // trim path pulls it back. for screen mirroring a glitch is preferable to that much
+    // standing delay, so the tuner is capped far lower. keep divisible by BUCKET_MS.
+    static constexpr int MAX_CUSHION_MS = 300;
     static constexpr int BUCKET_MS = 5;                  // histogram granularity
     static constexpr int NBUCKETS = MAX_CUSHION_MS / BUCKET_MS;
     static constexpr int64_t BUCKET_NS = (int64_t)BUCKET_MS * 1000000LL;
@@ -286,6 +290,7 @@ public:
         // prebuffer: hold output until cushion fills, builds jitter headroom
         if (mPriming) {
             const size_t buffered = mRing.available();
+            if (mPrimeStartNs == 0) mPrimeStartNs = now;
             // time the wait only while holding partial data; reset on empty ring so the
             // producer gets the full window once a sound starts, otherwise we could time
             // out on pre-sound silence and underrun the instant the first frame lands
@@ -295,20 +300,28 @@ public:
             // through 2x cushion of silence the sound is complete: play it
             const uint32_t starveFrames = (uint32_t)(2 * tuned / mChannels);
             const bool starved = buffered > 0 && mPrimeSilenceFrames >= starveFrames;
-            // also keep priming on empty ring: with 0 cushion `buffered < tuned` is
-            // never true, so we'd otherwise underrun on every empty read between sounds
-            if (buffered == 0 || (buffered < tuned && !starved)) {
+            // wall-clock ceiling on how long priming may mute output. the starve counter
+            // above resets whenever the ring hits empty, so audio that trickles in after a
+            // stream restart (new episode, new track) can oscillate between empty and
+            // partial without ever reaching `tuned` or accumulating `starveFrames` - and
+            // output stays muted the whole time. upstream has no bound on that; this does.
+            // once the window passes, play whatever is there and rebuild the cushion under it.
+            const bool primeTimedOut = (now - mPrimeStartNs) >= PRIME_TIMEOUT_NS;
+            // an empty ring still has nothing to play, timeout or not
+            if (buffered == 0 || (buffered < tuned && !starved && !primeTimedOut)) {
                 memset(out, 0, need * sizeof(int16_t));
                 return;
             }
             mPriming = false;
             mPrimeSilenceFrames = 0;
+            mPrimeStartNs = 0;
         }
 
         const size_t got = mRing.read(out, need);
         if (got < need) {
             memset(out + got, 0, (need - got) * sizeof(int16_t));
             mPriming = true;
+            mPrimeStartNs = 0;       // fresh bounded window for this re-prime
             mLastTrimBlockNs = now;  // hold off trims while rebuilding
             mUnderran.store(true, std::memory_order_relaxed);  // producer re-anchors
             mMetrics.countUnderrun();
@@ -321,13 +334,14 @@ public:
 
     // rebuild prebuffer cushion before resuming, e.g. after output stream restart;
     // must not run concurrently with read()
-    void reprime() { mPriming = true; }
+    void reprime() { mPriming = true; mPrimeStartNs = 0; }
 
     // drop buffered audio + rebuild cushion, so resume after pause doesn't play stale
     // tail; only while output callback is stopped (skip() is consumer-side)
     void flushAndReprime() {
         mRing.skip(mRing.available());
         mPriming = true;
+        mPrimeStartNs = 0;
     }
 
     // debug snapshot: backlog + tuned cushion (ms) + counters; reads only atomics, any thread
@@ -346,10 +360,11 @@ public:
 
 private:
 
-    // latency ceiling for cushion: 2x, but never below TRIM_FLOOR_MS so tiny cushion
-    // still gets slack before a trim (trim costs a glitch)
+    // latency ceiling for cushion: 1.5x, but never below TRIM_FLOOR_MS so tiny cushion
+    // still gets slack before a trim (trim costs a glitch). upstream uses 2x; tightened
+    // here so backlog turns into a trim before it is audible as lip-sync error
     size_t capOf(size_t cushionSamples) const {
-        return std::max(cushionSamples * 2, (size_t)mSampleRate * TRIM_FLOOR_MS / 1000 * mChannels);
+        return std::max(cushionSamples * 3 / 2, (size_t)mSampleRate * TRIM_FLOOR_MS / 1000 * mChannels);
     }
 
     void writeSilenceFrames(size_t frames) {
@@ -364,10 +379,12 @@ private:
 
     static constexpr int64_t SLACK_NS = 10'000'000LL;    // ignore <10ms gaps (NTP shift, rounding)
     static constexpr int64_t MAX_GAP_NS = 750'000'000LL; // >750ms = discontinuity, re-anchor
+    static constexpr int PRIME_TIMEOUT_MS = 200;         // max time priming may mute output
+    static constexpr int64_t PRIME_TIMEOUT_NS = (int64_t)PRIME_TIMEOUT_MS * 1'000'000LL;
     static constexpr int TRIM_FLOOR_MS = 30;             // min trim point even for tiny cushion
     static constexpr int TRIM_THROTTLE_MS = 2000;        // min spacing between trims, and after underrun
     static constexpr int64_t TRIM_THROTTLE_NS = (int64_t)TRIM_THROTTLE_MS * 1'000'000LL;
-    static constexpr int TRIM_SUSTAIN_MS = 2000;         // backlog must exceed cap this long before trim
+    static constexpr int TRIM_SUSTAIN_MS = 1000;         // backlog must exceed cap this long before trim (upstream 2000)
     static constexpr int64_t TRIM_SUSTAIN_NS = (int64_t)TRIM_SUSTAIN_MS * 1'000'000LL;
 
     const int mSampleRate;
@@ -377,6 +394,7 @@ private:
     TimelineMetrics mMetrics;
     bool mPriming = true;                // stream start: buffer output to build cushion
     uint32_t mPrimeSilenceFrames = 0;    // consumer-only: silence frames output while priming with partial data
+    int64_t mPrimeStartNs = 0;           // consumer-only: when this priming pass began (0 = not stamped yet)
     int64_t mLastTrimBlockNs = 0;        // consumer-only: last trim/underrun time (trim throttle)
     int64_t mAboveCapSinceNs = 0;        // consumer-only: when backlog first exceeded cap (0 = under)
     std::atomic<bool> mUnderran{false};  // consumer->producer: underrun happened

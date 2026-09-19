@@ -19,13 +19,15 @@ object Prefs {
     val KEY_PRIORITY: String = MediaFormat.KEY_PRIORITY; const val DEF_KEY_PRIORITY = true
     const val LOW_LATENCY = "low_latency"; const val DEF_LOW_LATENCY = false
     const val OPERATING_RATE = "operating_rate"; const val DEF_OPERATING_RATE = AUTO
-    const val SCHEDULED_OUTPUT_BUFFER_RELEASE = "scheduled_output_buffer_release"; const val DEF_SCHEDULED_OUTPUT_BUFFER_RELEASE = false
+    // on by default here: the drift servo in VideoRenderer makes timestamped release the
+    // better pacing choice, where upstream default-off avoided its one-shot anchor drifting
+    const val SCHEDULED_OUTPUT_BUFFER_RELEASE = "scheduled_output_buffer_release"; const val DEF_SCHEDULED_OUTPUT_BUFFER_RELEASE = true
     const val AUDIO_AUTO_BUFFER = "audio_auto_buffer"; const val DEF_AUDIO_AUTO_BUFFER = true
     // fixed cushion ms, used only when AUDIO_AUTO_BUFFER is off
     const val AUDIO_CUSHION_MS = "audio_cushion_ms"; const val DEF_AUDIO_CUSHION_MS = 40
     // slider step 0..4 mapping to arrival-delay percentile the cushion targets;
     // lower = less latency, higher = more stable
-    const val AUDIO_ADAPTIVE_STEP = "audio_adaptive_step"; const val DEF_AUDIO_ADAPTIVE_STEP = 3
+    const val AUDIO_ADAPTIVE_STEP = "audio_adaptive_step"; const val DEF_AUDIO_ADAPTIVE_STEP = 2  // 90th pct; upstream 3 (95th) trades lip-sync for glitch margin
     val ADAPTIVE_PERCENTILES = intArrayOf(80, 85, 90, 95, 99)
     const val OBOE_BUFFER_FRAMES = "oboe_buffer_frames"; const val DEF_OBOE_BUFFER_FRAMES = 0
     const val ALAC_ENABLED = "alac_enabled"; const val DEF_ALAC_ENABLED = false
@@ -38,7 +40,9 @@ object Prefs {
     const val ALLOW_NEW_CONN = "allow_new_conn"; const val DEF_ALLOW_NEW_CONN = true
     const val AUDIO_LATENCY_MS = "audio_latency_ms"; const val DEF_AUDIO_LATENCY_MS = -1
     const val DEBUG_ENABLED = "debug_enabled"; const val DEF_DEBUG_ENABLED = false
-    const val DEVELOPER_OPTIONS = "developer_options"; const val DEF_DEVELOPER_OPTIONS = false
+    // on by default here: the sync and audio-buffer controls live behind this flag, and they
+    // are the ones worth reaching on a TV box that struggles to keep lip-sync
+    const val DEVELOPER_OPTIONS = "developer_options"; const val DEF_DEVELOPER_OPTIONS = true
     const val BENCHMARK_LOG = "benchmark_log"; const val DEF_BENCHMARK_LOG = false
     const val IDLE_PREVIEW = "idle_preview"; const val DEF_IDLE_PREVIEW = false
     const val AUTO_FULLSCREEN = "auto_fullscreen"; const val DEF_AUTO_FULLSCREEN = true
