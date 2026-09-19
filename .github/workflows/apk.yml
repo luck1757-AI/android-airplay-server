@@ -24,9 +24,6 @@ jobs:
           java-version: "21"
           cache: "gradle"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       # No repository secrets needed. A throwaway key is generated per run, which is fine
       # for a personal sideloaded build - see the note in the job summary about upgrades.
       - name: Generate signing key
