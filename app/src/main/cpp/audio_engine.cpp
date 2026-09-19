@@ -120,15 +120,35 @@ struct AudioEngine {
     // touches decoder: must not run concurrently with stop()
     void decode(const uint8_t *data, size_t len, int ct, int64_t ptsNs) {
         if (!mTimeline) return;
+
+        // measure gaps in the arriving stream itself. every other counter sits downstream
+        // of this point, so a sender-side pause and a receiver-side stall look identical in
+        // the overlay (buffer 0 ms, no drops, no errors, no silence fill). this tells them
+        // apart: the line only appears if packets actually stopped coming in.
+        {
+            const int64_t nowNs = monoNs();
+            if (mLastPacketNs != 0 && nowNs - mLastPacketNs >= INPUT_STALL_NS)
+                mLog->error("audio input resumed after %lld ms with no packets",
+                            (long long)((nowNs - mLastPacketNs) / 1000000));
+            mLastPacketNs = nowNs;
+        }
         if (mPending.load(std::memory_order_relaxed)) {
             if (AudioConfig *raw = mPending.exchange(nullptr, std::memory_order_acquire)) {
                 std::unique_ptr<AudioConfig> c(raw);
-                mDecoder = {};
-                std::lock_guard<std::mutex> lk(mRebuildLock);
-                if (mOutputActive) mOutput->stop();
-                mOutput.reset();
-                initInternals(*c);
-                mOutputActive = mRunning ? mOutput->start() : false;
+                // the settings flow re-emits identical values shortly after the engine
+                // starts. rebuilding for that tears down a healthy low-latency mmap stream,
+                // and the replacement usually cannot reclaim the fast path - which is the
+                // "Oboe out: ... mmap=no, buffer=3770/3770" line appearing ~2s after
+                // connect, with no audio at all until it completes.
+                if (!mApplied || !sameConfig(*mApplied, *c)) {
+                    mLog->info("audio config changed; rebuilding output");
+                    mDecoder = {};
+                    std::lock_guard<std::mutex> lk(mRebuildLock);
+                    if (mOutputActive) mOutput->stop();
+                    mOutput.reset();
+                    initInternals(*c);
+                    mOutputActive = mRunning ? mOutput->start() : false;
+                }
             }
         }
 
@@ -179,6 +199,13 @@ struct AudioEngine {
     }
 
 private:
+    static bool sameConfig(const AudioConfig &a, const AudioConfig &b) {
+        return a.staticCushionMs == b.staticCushionMs && a.percentilePct == b.percentilePct
+            && a.oboeBufferFrames == b.oboeBufferFrames && a.forceSwAlac == b.forceSwAlac
+            && a.realtimePriority == b.realtimePriority && a.lowLatency == b.lowLatency
+            && a.benchmarkLog == b.benchmarkLog;
+    }
+
     static int ctIndex(int ct) {
         switch (ct) {
             case CT_ALAC:    return 0;
@@ -228,6 +255,8 @@ private:
     int64_t mRetryBackoffNs = DECODER_RETRY_MIN_NS;
     int mDecoderFailures = 0;   // consecutive failed creations
     int mStarvedPackets = 0;    // packets discarded while no decoder existed
+    static constexpr int64_t INPUT_STALL_NS = 250'000'000LL;  // report input gaps beyond this
+    int64_t mLastPacketNs = 0;  // arrival time of the previous audio packet
 
     // wanted config per codec, keyed by ctIndex
     static constexpr int NUM_CT = 3;
