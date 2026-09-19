@@ -510,7 +510,14 @@ fun MainScreen(
             onPip = onPip
         )
     } else {
+        // TVs overscan: inset the whole tabbed UI - every screen and the navigation bar -
+        // by the broadcast-safe margin, instead of each screen doing it for itself.
+        val tvInset = isTv()
         Scaffold(
+            modifier = Modifier.padding(
+                horizontal = if (tvInset) 48.dp else 0.dp,
+                vertical = if (tvInset) 27.dp else 0.dp,
+            ),
             bottomBar = {
                 Column {
                     AudioMiniController(

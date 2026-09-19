@@ -17,7 +17,10 @@ object Prefs {
     const val ENFORCE_SDR = "enforce_sdr"; const val DEF_ENFORCE_SDR = true
     val KEY_ALLOW_FRAME_DROP: String = MediaFormat.KEY_ALLOW_FRAME_DROP; const val DEF_KEY_ALLOW_FRAME_DROP = true
     val KEY_PRIORITY: String = MediaFormat.KEY_PRIORITY; const val DEF_KEY_PRIORITY = true
-    const val LOW_LATENCY = "low_latency"; const val DEF_LOW_LATENCY = false
+    // on by default here, and AudioConfig's default must equal it: a mismatch makes the
+    // settings flow look like a config change right after connect, which tears down the
+    // freshly opened low-latency mmap stream and reopens it at 3770 frames
+    const val LOW_LATENCY = "low_latency"; const val DEF_LOW_LATENCY = true
     const val OPERATING_RATE = "operating_rate"; const val DEF_OPERATING_RATE = AUTO
     // on by default here: the drift servo in VideoRenderer makes timestamped release the
     // better pacing choice, where upstream default-off avoided its one-shot anchor drifting

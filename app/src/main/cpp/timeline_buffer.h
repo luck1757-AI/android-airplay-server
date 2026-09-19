@@ -264,8 +264,15 @@ public:
         } else if (gapNs < -SLACK_NS) {
             // slot already passed (late/overlap): drop
             mMetrics.countDrop();
-            return;
+            // upstream returns unconditionally here, and mExpectedPtsNs only advances on an
+            // accepted packet - so when the sender restarts its timeline slightly behind
+            // ours (new episode, new clip) every packet looks late, every packet is dropped,
+            // and the expectation never moves: audio stays muted until real time catches up.
+            // after a few in a row, treat it as a restart and re-anchor to what is arriving.
+            if (++mConsecutiveLate < MAX_CONSECUTIVE_LATE) return;
+            mTracker.reanchor();
         }
+        mConsecutiveLate = 0;
         mRing.write(pcm, samples);
         mExpectedPtsNs = ptsNs + durNs;
     }
@@ -390,6 +397,7 @@ private:
     // longest sender gap still reproduced as buffered silence; beyond this it is treated
     // as a pause and resynced. upstream has no such bound (it fills up to MAX_GAP_MS).
     static constexpr int MAX_SILENCE_FILL_MS = 120;
+    static constexpr int MAX_CONSECUTIVE_LATE = 5;       // then re-anchor instead of dropping
     static constexpr int64_t MAX_SILENCE_FILL_NS = (int64_t)MAX_SILENCE_FILL_MS * 1'000'000LL;
     static constexpr int PRIME_TIMEOUT_MS = 200;         // max time priming may mute output
     static constexpr int64_t PRIME_TIMEOUT_NS = (int64_t)PRIME_TIMEOUT_MS * 1'000'000LL;
@@ -407,6 +415,7 @@ private:
     bool mPriming = true;                // stream start: buffer output to build cushion
     uint32_t mPrimeSilenceFrames = 0;    // consumer-only: silence frames output while priming with partial data
     int64_t mPrimeStartNs = 0;           // consumer-only: when this priming pass began (0 = not stamped yet)
+    int mConsecutiveLate = 0;            // producer-only: packets dropped as late in a row
     int64_t mLastTrimBlockNs = 0;        // consumer-only: last trim/underrun time (trim throttle)
     int64_t mAboveCapSinceNs = 0;        // consumer-only: when backlog first exceeded cap (0 = under)
     std::atomic<bool> mUnderran{false};  // consumer->producer: underrun happened

@@ -71,17 +71,13 @@ fun SettingsScreen(viewModel: MainViewModel) {
     val audioAdaptiveStep by viewModel.audioAdaptiveStep.collectAsState()
     val oboeBufferFrames by viewModel.oboeBufferFrames.collectAsState()
 
-    // TVs overscan: without a safe-area inset the first and last columns of the UI are cut
-    // off by the panel's own bezel/scaling. 5% each way is the usual broadcast-safe margin.
-    val tv = isTv()
+    // the TV safe-area inset lives on the Scaffold in MainScreen, so every tab and the
+    // navigation bar get it once rather than each screen repeating (and doubling) it
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(
-                horizontal = if (tv) 48.dp else 0.dp,
-                vertical = if (tv) 27.dp else 8.dp,
-            )
+            .padding(vertical = 8.dp)
     ) {
         SectionHeader(stringResource(R.string.section_server))
 
