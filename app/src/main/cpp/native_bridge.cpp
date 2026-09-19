@@ -36,12 +36,30 @@ typedef struct {
     std::shared_ptr<LogSink> log;
 } server_ctx_t;
 
+/* RTSP session milestones worth surfacing in the app's own log page. the per-packet
+ * debug chatter stays in logcat only: emitting goes through JNI, and flooding it from
+ * the streaming threads would disturb the very timing we are trying to measure. */
+static bool _is_session_milestone(const char *msg) {
+    static const char *const kKeys[] = {
+        "TEARDOWN", "SETUP", "RECORD", "FLUSH", "ANNOUNCE", "PAUSE", "OPTIONS",
+    };
+    for (const char *key : kKeys) {
+        if (strstr(msg, key)) return true;
+    }
+    return false;
+}
+
 static void _log_callback(void *cls, int level, const char *msg) {
     int prio = ANDROID_LOG_DEBUG;
     if (level >= 5) prio = ANDROID_LOG_ERROR;
     else if (level >= 4) prio = ANDROID_LOG_WARN;
     else if (level >= 3) prio = ANDROID_LOG_INFO;
     __android_log_print(prio, TAG, "%s", msg);
+    // the log page is the only thing exportable from a TV without adb, so the RTSP
+    // conversation has to reach it: that is where a stream teardown/re-setup shows up
+    if (LogSink *sink = (LogSink *)cls) {
+        if (_is_session_milestone(msg)) sink->info("RTSP %s", msg);
+    }
 }
 
 extern "C"
@@ -71,7 +89,9 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeInit(
     }
     ctx->cb_ctx.raop = ctx->raop;
 
-    raop_set_log_level(ctx->raop, LOGGER_ERR);
+    // DEBUG (7), not DEBUG_DATA (8): the RTSP handlers log stream setup/teardown at this
+    // level, while per-packet dumps sit one level above and stay off
+    raop_set_log_level(ctx->raop, LOGGER_DEBUG);
     raop_set_log_callback(ctx->raop, _log_callback, NULL);
 
     const char *keyfile_c = env->GetStringUTFChars(keyFile, NULL);
@@ -113,6 +133,8 @@ Java_io_github_jqssun_airplay_bridge_NativeBridge_nativeInit(
 
     ctx->log = std::make_shared<LogSink>();
     ctx->log->bind(env, callback);
+    // re-register now that the sink exists: the earlier call ran before ctx->log was created
+    raop_set_log_callback(ctx->raop, _log_callback, ctx->log.get());
 
     ctx->cb_ctx.audio_engine = audio_engine_create(ctx->log, 44100, 2);
 
