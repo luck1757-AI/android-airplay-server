@@ -1,20 +1,13 @@
-name: Generate APK
+name: 编译 APK
 
 env:
   main_project_module: app
 
 on:
+  workflow_dispatch:
   push:
     branches:
-      - "release/**"
-    tags:
-      - "v*.*.*"
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "v*.*.*"
-        required: true
-        type: string
+      - "custom/**"
 
 jobs:
   build:
@@ -24,16 +17,6 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Set TAG
-        if: github.event_name == 'push'
-        run: |
-          echo "version=$(echo '${{ github.ref_name }}' | awk -F 'v' '{print $2}')" >> $GITHUB_ENV
-
-      - name: Set TAG
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          echo "version=$(echo '${{ inputs.version }}' | awk -F 'v' '{print $2}')" >> $GITHUB_ENV
-
       - name: Use JDK
         uses: actions/setup-java@v4
         with:
@@ -41,21 +24,52 @@ jobs:
           java-version: "21"
           cache: "gradle"
 
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # No repository secrets needed. A throwaway key is generated per run, which is fine
+      # for a personal sideloaded build - see the note in the job summary about upgrades.
+      - name: Generate signing key
+        run: |
+          keytool -genkeypair -v \
+            -keystore upload.jks \
+            -alias custom \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass custombuild -keypass custombuild \
+            -dname "CN=AirPlay Custom Build, OU=Personal, O=Personal, L=-, S=-, C=CN"
+          cat > local.properties <<EOF
+          storeFile=../upload.jks
+          storePassword=custombuild
+          keyAlias=custom
+          keyPassword=custombuild
+          EOF
+
       - name: Build
         run: |
           export SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)
-          echo ${{ secrets.STORE }} | base64 -d > upload.jks
-          echo ${{ secrets.LOCAL }} | base64 -d > local.properties
-          chmod +x ./gradlew;
-          ./gradlew assembleRelease bundleRelease --stacktrace
-          rm upload.jks local.properties
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --stacktrace
 
-      - name: Publish (GitHub)
-        uses: softprops/action-gh-release@v2
+      - name: Clean up key material
+        if: always()
+        run: rm -f upload.jks local.properties
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          name: v${{ env.version }}
-          tag_name: v${{ env.version }}
-          files: |
-            ${{ env.main_project_module }}/build/outputs/apk/release/app-release.apk
-            ${{ env.main_project_module }}/build/outputs/bundle/release/app-release.aab
+          name: airplay-custom-apk
+          path: ${{ env.main_project_module }}/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo "### 编译完成"
+            echo ""
+            echo "到本次运行页面底部的 **Artifacts** 区域下载 \`airplay-custom-apk\`。"
+            echo ""
+            echo "> 每次编译都会重新生成签名密钥，所以签名和上一版不同。"
+            echo "> 安装新版本前，请先在盒子上卸载旧版本。"
+          } >> "$GITHUB_STEP_SUMMARY"
